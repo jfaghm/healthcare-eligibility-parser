@@ -1,203 +1,233 @@
 #!/usr/bin/env python3
 """
-Simple EDI 271 Parser - No Database Required
-Just parses EDI files and generates reports
+Tests for EDI 271 Parser with PostgreSQL support
 """
 
-import argparse
-import json
+import pytest
+import tempfile
 import os
-from dataclasses import dataclass, asdict
+from unittest.mock import Mock, patch, MagicMock
+from datetime import datetime
 
-@dataclass
-class EligibilityResponse:
-    transaction_id: str = ""
-    response_date: str = ""
-    payer_name: str = ""
-    provider_name: str = ""
-    provider_npi: str = ""
-    subscriber_name: str = ""
-    member_id: str = ""
-    group_number: str = ""
-    employer: str = ""
-    address: str = ""
-    date_of_birth: str = ""
-    gender: str = ""
-    plan_name: str = ""
-    individual_deductible: str = ""
-    individual_deductible_met: str = ""
-    status: str = "Active"
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-class SimpleEDI271Parser:
-    def __init__(self):
-        self.data = EligibilityResponse()
-    
-    def parse_file(self, file_path: str) -> EligibilityResponse:
-        with open(file_path, 'r') as f:
-            content = f.read().strip()
-        return self.parse_content(content)
-    
-    def parse_content(self, content: str) -> EligibilityResponse:
-        segments = [seg.strip() for seg in content.split('~') if seg.strip()]
-        
-        for segment in segments:
-            if not segment:
-                continue
-            elements = segment.split('*')
-            segment_type = elements[0]
-            
-            if segment_type == 'ST' and len(elements) > 2:
-                self.data.transaction_id = elements[2]
-            
-            elif segment_type == 'BHT' and len(elements) > 4:
-                date_str = elements[4]
-                if len(date_str) == 8:
-                    self.data.response_date = f"{date_str[4:6]}/{date_str[6:8]}/{date_str[:4]}"
-            
-            elif segment_type == 'NM1':
-                if len(elements) > 1:
-                    entity_type = elements[1]
-                    if entity_type == 'PR' and len(elements) > 3:  # Payer
-                        self.data.payer_name = elements[3]
-                    elif entity_type == '1P' and len(elements) > 3:  # Provider
-                        self.data.provider_name = elements[3]
-                        if len(elements) > 9:
-                            self.data.provider_npi = elements[9]
-                    elif entity_type == 'IL':  # Subscriber
-                        if len(elements) > 4:
-                            last = elements[3] if len(elements) > 3 else ""
-                            first = elements[4] if len(elements) > 4 else ""
-                            middle = elements[5] if len(elements) > 5 else ""
-                            self.data.subscriber_name = f"{last}, {first}"
-                            if middle:
-                                self.data.subscriber_name += f" {middle}"
-                        if len(elements) > 9:
-                            self.data.member_id = elements[9]
-            
-            elif segment_type == 'REF' and len(elements) > 2:
-                ref_type = elements[1]
-                if ref_type == '18':
-                    self.data.group_number = elements[2]
-                elif ref_type == '6P' and len(elements) > 3:
-                    self.data.employer = elements[3]
-            
-            elif segment_type == 'N3' and len(elements) > 1:
-                self.data.address = elements[1]
-            
-            elif segment_type == 'N4' and len(elements) > 3 and self.data.address:
-                city = elements[1]
-                state = elements[2]
-                zip_code = elements[3]
-                self.data.address += f", {city}, {state} {zip_code}"
-            
-            elif segment_type == 'DMG':
-                if len(elements) > 2:
-                    date_str = elements[2]
-                    if len(date_str) == 8:
-                        self.data.date_of_birth = f"{date_str[4:6]}/{date_str[6:8]}/{date_str[:4]}"
-                if len(elements) > 3:
-                    self.data.gender = "Female" if elements[3] == 'F' else "Male"
-            
-            elif segment_type == 'EB':
-                if len(elements) > 4 and 'PLAN' in elements[4].upper():
-                    self.data.plan_name = elements[4]
-                
-                # Parse financial amounts
-                if len(elements) > 7:
-                    amount = elements[7]
-                    if amount and amount.replace('.', '').replace('-', '').isdigit():
-                        formatted_amount = f"${float(amount):,.2f}"
-                        
-                        if len(elements) > 1:
-                            benefit_type = elements[1]
-                            if benefit_type == 'C':  # Coverage
-                                coverage_level = elements[2] if len(elements) > 2 else ""
-                                time_period = elements[6] if len(elements) > 6 else ""
-                                
-                                if time_period == '22' and coverage_level == 'IND':
-                                    if not self.data.individual_deductible:
-                                        self.data.individual_deductible = formatted_amount
-                                elif time_period == '29' and coverage_level == 'IND':
-                                    if not self.data.individual_deductible_met:
-                                        self.data.individual_deductible_met = formatted_amount
-        
-        return self.data
+from edi271_parser import (
+    EligibilityResponse, 
+    SimpleEDI271Parser, 
+    DatabaseManager,
+    PSYCOPG2_AVAILABLE
+)
 
-def generate_html_report(data: EligibilityResponse, output_file: str):
-    html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>EDI 271 Report</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; }}
-        .container {{ max-width: 800px; }}
-        ul {{ line-height: 1.6; }}
-        .header {{ color: #333; border-bottom: 2px solid #007acc; padding-bottom: 10px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1 class="header">EDI 271 Eligibility Response Report</h1>
-        <ul>
-            <li><strong>Transaction ID:</strong> {data.transaction_id}</li>
-            <li><strong>Response Date:</strong> {data.response_date}</li>
-            <li><strong>Payer:</strong> {data.payer_name}</li>
-            <li><strong>Provider:</strong> {data.provider_name}</li>
-            <li><strong>Provider NPI:</strong> {data.provider_npi}</li>
-            <li><strong>Subscriber:</strong> {data.subscriber_name}</li>
-            <li><strong>Member ID:</strong> {data.member_id}</li>
-            <li><strong>Group Number:</strong> {data.group_number}</li>
-            <li><strong>Employer:</strong> {data.employer}</li>
-            <li><strong>Address:</strong> {data.address}</li>
-            <li><strong>Date of Birth:</strong> {data.date_of_birth}</li>
-            <li><strong>Gender:</strong> {data.gender}</li>
-            <li><strong>Plan:</strong> {data.plan_name}</li>
-            <li><strong>Individual Deductible:</strong> {data.individual_deductible}</li>
-            <li><strong>Individual Deductible Met:</strong> {data.individual_deductible_met}</li>
-            <li><strong>Status:</strong> {data.status}</li>
-        </ul>
-    </div>
-</body>
-</html>
-"""
-    
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w') as f:
-        f.write(html_content)
-    print(f"HTML report saved to: {output_file}")
+# Sample EDI 271 content for testing
+SAMPLE_EDI_271 = """ST*271*1234567890~
+BHT*0022*11*1*20240801*1200~
+HL*1**20*1~
+NM1*PR*2*BLUE CROSS BLUE SHIELD*****PI*12345~
+HL*2*1*21*1~
+NM1*1P*2*PROVIDER NAME*****XX*1234567890~
+HL*3*2*22*0~
+TRN*2*1234567890*1234567890~
+NM1*IL*1*DOE*JOHN*M***MI*123456789~
+REF*18*GRP12345~
+REF*6P*ACME CORP~
+N3*123 MAIN ST~
+N4*ANYTOWN*CA*90210~
+DMG*D8*19900101*M~
+DTP*346*D8*20240801~
+EB*1*IND**30*MEDICAL PLAN*22*2500.00~
+EB*1*IND**30*MEDICAL PLAN*29*500.00~
+SE*19*1234567890~"""
 
-def main():
-    parser = argparse.ArgumentParser(description='Simple EDI 271 Parser')
-    parser.add_argument('input_file', help='Path to EDI 271 file')
-    parser.add_argument('--html-output', help='Output path for HTML report')
-    parser.add_argument('--json-output', help='Output path for JSON data')
+class TestEligibilityResponse:
+    def test_eligibility_response_creation(self):
+        response = EligibilityResponse()
+        assert response.status == "Active"
+        assert response.created_at != ""
+        
+    def test_eligibility_response_with_data(self):
+        response = EligibilityResponse(
+            transaction_id="123456",
+            subscriber_name="Doe, John",
+            member_id="987654321"
+        )
+        assert response.transaction_id == "123456"
+        assert response.subscriber_name == "Doe, John"
+        assert response.member_id == "987654321"
+
+class TestSimpleEDI271Parser:
+    def test_parser_initialization_without_db(self):
+        parser = SimpleEDI271Parser()
+        assert parser.db_manager is None
+        assert isinstance(parser.data, EligibilityResponse)
     
-    args = parser.parse_args()
+    def test_parser_initialization_with_mock_db(self):
+        mock_db = Mock(spec=DatabaseManager)
+        parser = SimpleEDI271Parser(mock_db)
+        assert parser.db_manager is mock_db
     
-    try:
-        print(f"Parsing EDI file: {args.input_file}")
-        parser_obj = SimpleEDI271Parser()
-        data = parser_obj.parse_file(args.input_file)
+    def test_parse_content(self):
+        parser = SimpleEDI271Parser()
+        result = parser.parse_content(SAMPLE_EDI_271)
         
-        if args.html_output:
-            generate_html_report(data, args.html_output)
+        assert result.transaction_id == "1234567890"
+        assert result.payer_name == "BLUE CROSS BLUE SHIELD"
+        assert result.provider_name == "PROVIDER NAME"
+        assert result.provider_npi == "1234567890"
+        assert result.subscriber_name == "DOE, JOHN M"
+        assert result.member_id == "123456789"
+        assert result.group_number == "GRP12345"
+        assert result.employer == "ACME CORP"
+        assert result.address == "123 MAIN ST, ANYTOWN, CA 90210"
+        assert result.date_of_birth == "01/01/1990"
+        assert result.gender == "Male"
+        assert result.individual_deductible == "$2,500.00"
+        assert result.individual_deductible_met == "$500.00"
+    
+    def test_parse_file(self):
+        parser = SimpleEDI271Parser()
         
-        if args.json_output:
-            os.makedirs(os.path.dirname(args.json_output), exist_ok=True)
-            with open(args.json_output, 'w') as f:
-                json.dump(asdict(data), f, indent=2)
-            print(f"JSON saved to: {args.json_output}")
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.edi', delete=False) as f:
+            f.write(SAMPLE_EDI_271)
+            temp_file = f.name
         
-        print("\n=== PARSING RESULTS ===")
-        print(f"Subscriber: {data.subscriber_name}")
-        print(f"Payer: {data.payer_name}")
-        print(f"Plan: {data.plan_name}")
-        print(f"Transaction ID: {data.transaction_id}")
+        try:
+            result = parser.parse_file(temp_file)
+            assert result.transaction_id == "1234567890"
+            assert result.subscriber_name == "DOE, JOHN M"
+        finally:
+            os.unlink(temp_file)
+    
+    def test_parse_file_with_db_save(self):
+        mock_db = Mock(spec=DatabaseManager)
+        mock_db.insert_eligibility_response.return_value = 123
         
-    except Exception as e:
-        print(f"Error: {e}")
-        return 1
+        parser = SimpleEDI271Parser(mock_db)
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.edi', delete=False) as f:
+            f.write(SAMPLE_EDI_271)
+            temp_file = f.name
+        
+        try:
+            result = parser.parse_file(temp_file, save_to_db=True)
+            assert result.transaction_id == "1234567890"
+            mock_db.insert_eligibility_response.assert_called_once()
+        finally:
+            os.unlink(temp_file)
+    
+    def test_get_member_eligibility_without_db(self):
+        parser = SimpleEDI271Parser()
+        result = parser.get_member_eligibility("123456")
+        assert result is None
+    
+    def test_get_member_eligibility_with_db(self):
+        mock_db = Mock(spec=DatabaseManager)
+        mock_data = {"member_id": "123456", "subscriber_name": "Doe, John"}
+        mock_db.get_eligibility_by_member_id.return_value = mock_data
+        
+        parser = SimpleEDI271Parser(mock_db)
+        result = parser.get_member_eligibility("123456")
+        
+        assert result == mock_data
+        mock_db.get_eligibility_by_member_id.assert_called_once_with("123456")
+    
+    def test_update_member_status_without_db(self):
+        parser = SimpleEDI271Parser()
+        result = parser.update_member_status(1, "Inactive")
+        assert result is False
+    
+    def test_update_member_status_with_db(self):
+        mock_db = Mock(spec=DatabaseManager)
+        mock_db.update_eligibility_status.return_value = True
+        
+        parser = SimpleEDI271Parser(mock_db)
+        result = parser.update_member_status(1, "Inactive")
+        
+        assert result is True
+        mock_db.update_eligibility_status.assert_called_once_with(1, "Inactive")
+
+@pytest.mark.skipif(not PSYCOPG2_AVAILABLE, reason="psycopg2 not available")
+class TestDatabaseManager:
+    def test_database_manager_initialization_without_psycopg2(self):
+        with patch('edi271_parser.PSYCOPG2_AVAILABLE', False):
+            with pytest.raises(ImportError):
+                DatabaseManager({"host": "localhost"})
+    
+    @patch('edi271_parser.psycopg2.pool.ThreadedConnectionPool')
+    def test_initialize_pool(self, mock_pool):
+        config = {
+            "host": "localhost",
+            "port": 5432,
+            "database": "test_db",
+            "user": "test_user",
+            "password": "test_password"
+        }
+        
+        db_manager = DatabaseManager(config)
+        db_manager.initialize_pool()
+        
+        mock_pool.assert_called_once_with(1, 10, **config)
+    
+    @patch('edi271_parser.psycopg2.pool.ThreadedConnectionPool')
+    def test_get_connection_context_manager(self, mock_pool):
+        mock_conn = Mock()
+        mock_pool_instance = Mock()
+        mock_pool_instance.getconn.return_value = mock_conn
+        mock_pool.return_value = mock_pool_instance
+        
+        config = {"host": "localhost", "database": "test_db"}
+        db_manager = DatabaseManager(config)
+        
+        with db_manager.get_connection() as conn:
+            assert conn is mock_conn
+        
+        mock_pool_instance.putconn.assert_called_once_with(mock_conn)
+    
+    def test_parse_date_valid_formats(self):
+        config = {"host": "localhost"}
+        
+        with patch('edi271_parser.PSYCOPG2_AVAILABLE', True):
+            db_manager = DatabaseManager(config)
+            
+            # Test MM/DD/YYYY format
+            assert db_manager._parse_date("01/15/2024") == "2024-01-15"
+            assert db_manager._parse_date("12/31/2023") == "2023-12-31"
+            
+            # Test empty string
+            assert db_manager._parse_date("") is None
+            assert db_manager._parse_date(None) is None
+            
+            # Test invalid format
+            assert db_manager._parse_date("invalid-date") == "invalid-date"
+
+class TestIntegration:
+    def test_parser_without_database_integration(self):
+        """Test that parser works without any database configuration"""
+        parser = SimpleEDI271Parser()
+        result = parser.parse_content(SAMPLE_EDI_271)
+        
+        assert result.transaction_id == "1234567890"
+        assert result.subscriber_name == "DOE, JOHN M"
+        
+        # Test database operations return appropriate defaults
+        assert parser.get_member_eligibility("123456") is None
+        assert parser.update_member_status(1, "Inactive") is False
+    
+    @patch('edi271_parser.PSYCOPG2_AVAILABLE', True)
+    def test_database_operations_error_handling(self):
+        """Test error handling in database operations"""
+        mock_db = Mock(spec=DatabaseManager)
+        mock_db.get_eligibility_by_member_id.side_effect = Exception("Database error")
+        mock_db.update_eligibility_status.side_effect = Exception("Database error")
+        
+        parser = SimpleEDI271Parser(mock_db)
+        
+        # Should handle exceptions gracefully
+        result = parser.get_member_eligibility("123456")
+        assert result is None
+        
+        success = parser.update_member_status(1, "Inactive")
+        assert success is False
 
 if __name__ == "__main__":
-    main()
+    pytest.main([__file__, "-v"])
