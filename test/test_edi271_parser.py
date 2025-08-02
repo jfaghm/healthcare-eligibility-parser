@@ -37,7 +37,8 @@ DMG*D8*19900101*M~
 DTP*346*D8*20240801~
 EB*1*IND**30*MEDICAL PLAN*22*2500.00~
 EB*1*IND**30*MEDICAL PLAN*29*500.00~
-SE*19*1234567890~"""
+EB*B*IND**A3*PREVENTIVE CARE*23*25.00~
+SE*20*1234567890~"""
 
 class TestEligibilityResponse:
     def test_eligibility_response_creation(self):
@@ -83,6 +84,7 @@ class TestSimpleEDI271Parser:
         assert result.gender == "Male"
         assert result.individual_deductible == "$2,500.00"
         assert result.individual_deductible_met == "$500.00"
+        assert result.preventative_care_copay == "$25.00"
     
     def test_parse_file(self):
         parser = SimpleEDI271Parser()
@@ -145,6 +147,27 @@ class TestSimpleEDI271Parser:
         
         assert result is True
         mock_db.update_eligibility_status.assert_called_once_with(1, "Inactive")
+    
+    def test_preventative_care_copay_parsing(self):
+        """Test specific parsing of preventative care co-pay"""
+        parser = SimpleEDI271Parser()
+        
+        # Test with A3 benefit code
+        test_edi_a3 = """ST*271*TEST123~
+EB*B*IND**A3*PREVENTIVE CARE*23*20.00~
+SE*3*TEST123~"""
+        
+        result = parser.parse_content(test_edi_a3)
+        assert result.preventative_care_copay == "$20.00"
+        
+        # Test with 98 benefit code
+        parser2 = SimpleEDI271Parser()
+        test_edi_98 = """ST*271*TEST456~
+EB*C*IND**98*WELLNESS VISIT*23*15.00~
+SE*3*TEST456~"""
+        
+        result2 = parser2.parse_content(test_edi_98)
+        assert result2.preventative_care_copay == "$15.00"
 
 @pytest.mark.skipif(not PSYCOPG2_AVAILABLE, reason="psycopg2 not available")
 class TestDatabaseManager:

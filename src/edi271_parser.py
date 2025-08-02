@@ -38,6 +38,7 @@ class EligibilityResponse:
     plan_name: str = ""
     individual_deductible: str = ""
     individual_deductible_met: str = ""
+    preventative_care_copay: str = ""
     status: str = "Active"
     created_at: str = ""
     
@@ -106,6 +107,7 @@ class DatabaseManager:
             plan_name VARCHAR(255),
             individual_deductible VARCHAR(20),
             individual_deductible_met VARCHAR(20),
+            preventative_care_copay VARCHAR(20),
             status VARCHAR(50) DEFAULT 'Active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -133,12 +135,12 @@ class DatabaseManager:
             transaction_id, response_date, payer_name, provider_name, provider_npi,
             subscriber_name, member_id, group_number, employer, address,
             date_of_birth, gender, plan_name, individual_deductible, 
-            individual_deductible_met, status
+            individual_deductible_met, preventative_care_copay, status
         ) VALUES (
             %(transaction_id)s, %(response_date)s, %(payer_name)s, %(provider_name)s, %(provider_npi)s,
             %(subscriber_name)s, %(member_id)s, %(group_number)s, %(employer)s, %(address)s,
             %(date_of_birth)s, %(gender)s, %(plan_name)s, %(individual_deductible)s,
-            %(individual_deductible_met)s, %(status)s
+            %(individual_deductible_met)s, %(preventative_care_copay)s, %(status)s
         ) RETURNING id;
         """
         
@@ -310,6 +312,7 @@ class SimpleEDI271Parser:
                         
                         coverage_level = elements[2] if len(elements) > 2 else ""
                         time_period = elements[6] if len(elements) > 6 else ""
+                        benefit_info = elements[4] if len(elements) > 4 else ""
                         
                         # Check for deductible indicators
                         if coverage_level == 'IND':
@@ -319,6 +322,24 @@ class SimpleEDI271Parser:
                             elif time_period == '29':
                                 if not self.data.individual_deductible_met:
                                     self.data.individual_deductible_met = formatted_amount
+                        
+                        # Check for co-pay indicators (A3 = Preventative Care, 98 = Preventive/Wellness)
+                        if benefit_info in ['A3', '98'] or 'PREVENTIVE' in elements[5].upper() if len(elements) > 5 else False:
+                            if not self.data.preventative_care_copay:
+                                self.data.preventative_care_copay = formatted_amount
+                
+                # Also check for co-pay information in other positions
+                if len(elements) > 1:
+                    benefit_type = elements[1]
+                    # B = Coverage modifier, C = Coverage amount
+                    if benefit_type in ['B', 'C'] and len(elements) > 4:
+                        benefit_info = elements[4] if len(elements) > 4 else ""
+                        # Look for preventative care codes
+                        if benefit_info in ['A3', '98'] and len(elements) > 7:
+                            amount = elements[7]
+                            if amount and amount.replace('.', '').replace('-', '').isdigit():
+                                if not self.data.preventative_care_copay:
+                                    self.data.preventative_care_copay = f"${float(amount):,.2f}"
         
         return self.data
     
@@ -378,6 +399,7 @@ def generate_html_report(data: EligibilityResponse, output_file: str):
             <li><strong>Plan:</strong> {data.plan_name}</li>
             <li><strong>Individual Deductible:</strong> {data.individual_deductible}</li>
             <li><strong>Individual Deductible Met:</strong> {data.individual_deductible_met}</li>
+            <li><strong>Preventative Care Co-pay:</strong> {data.preventative_care_copay}</li>
             <li><strong>Status:</strong> {data.status}</li>
         </ul>
     </div>
@@ -503,6 +525,7 @@ def main():
         print(f"Payer: {data.payer_name}")
         print(f"Plan: {data.plan_name}")
         print(f"Transaction ID: {data.transaction_id}")
+        print(f"Preventative Care Co-pay: {data.preventative_care_copay if data.preventative_care_copay else 'Not specified'}")
         
         if args.save_to_db and db_manager:
             print("Data saved to database successfully")
