@@ -39,6 +39,7 @@ class EligibilityResponse:
     individual_deductible: str = ""
     individual_deductible_met: str = ""
     preventative_care_copay: str = ""
+    mental_health_covered: str = "Not specified"
     status: str = "Active"
     created_at: str = ""
     
@@ -108,6 +109,7 @@ class DatabaseManager:
             individual_deductible VARCHAR(20),
             individual_deductible_met VARCHAR(20),
             preventative_care_copay VARCHAR(20),
+            mental_health_covered VARCHAR(20) DEFAULT 'Not specified',
             status VARCHAR(50) DEFAULT 'Active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -135,12 +137,12 @@ class DatabaseManager:
             transaction_id, response_date, payer_name, provider_name, provider_npi,
             subscriber_name, member_id, group_number, employer, address,
             date_of_birth, gender, plan_name, individual_deductible, 
-            individual_deductible_met, preventative_care_copay, status
+            individual_deductible_met, preventative_care_copay, mental_health_covered, status
         ) VALUES (
             %(transaction_id)s, %(response_date)s, %(payer_name)s, %(provider_name)s, %(provider_npi)s,
             %(subscriber_name)s, %(member_id)s, %(group_number)s, %(employer)s, %(address)s,
             %(date_of_birth)s, %(gender)s, %(plan_name)s, %(individual_deductible)s,
-            %(individual_deductible_met)s, %(preventative_care_copay)s, %(status)s
+            %(individual_deductible_met)s, %(preventative_care_copay)s, %(mental_health_covered)s, %(status)s
         ) RETURNING id;
         """
         
@@ -340,6 +342,15 @@ class SimpleEDI271Parser:
                             if amount and amount.replace('.', '').replace('-', '').isdigit():
                                 if not self.data.preventative_care_copay:
                                     self.data.preventative_care_copay = f"${float(amount):,.2f}"
+                
+                # Check for Mental Health (MH) coverage in benefit codes
+                if len(elements) > 3 and elements[3]:
+                    if '^' in elements[3]:
+                        benefit_codes = elements[3].split('^')
+                        if 'MH' in benefit_codes:
+                            self.data.mental_health_covered = "Yes"
+                    elif elements[3] == 'MH':
+                        self.data.mental_health_covered = "Yes"
         
         return self.data
     
@@ -399,7 +410,7 @@ def generate_html_report(data: EligibilityResponse, output_file: str):
             <li><strong>Plan:</strong> {data.plan_name}</li>
             <li><strong>Individual Deductible:</strong> {data.individual_deductible}</li>
             <li><strong>Individual Deductible Met:</strong> {data.individual_deductible_met}</li>
-            <li><strong>Preventative Care Co-pay:</strong> {data.preventative_care_copay}</li>
+            <li><strong>Mental Health Covered:</strong> {data.mental_health_covered}</li>
             <li><strong>Status:</strong> {data.status}</li>
         </ul>
     </div>
@@ -525,7 +536,7 @@ def main():
         print(f"Payer: {data.payer_name}")
         print(f"Plan: {data.plan_name}")
         print(f"Transaction ID: {data.transaction_id}")
-        print(f"Preventative Care Co-pay: {data.preventative_care_copay if data.preventative_care_copay else 'Not specified'}")
+        print(f"Mental Health Covered: {data.mental_health_covered}")
         
         if args.save_to_db and db_manager:
             print("Data saved to database successfully")
